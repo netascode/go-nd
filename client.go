@@ -207,7 +207,7 @@ func (client *Client) Do(req Req) (Res, error) {
 				log.Printf("[ERROR] HTTP Request failed: StatusCode %v", httpRes.StatusCode)
 				log.Printf("[DEBUG] Exit from Do method")
 				return res, fmt.Errorf("HTTP Request failed: StatusCode %v", httpRes.StatusCode)
-			} else if httpRes.StatusCode == 408 || (httpRes.StatusCode >= 500 && httpRes.StatusCode <= 599) {
+			} else if httpRes.StatusCode == 408 || (httpRes.StatusCode >= 501 && httpRes.StatusCode <= 599) {
 				log.Printf("[ERROR] HTTP Request failed: StatusCode %v, Retries: %v", httpRes.StatusCode, attempts)
 				continue
 			} else {
