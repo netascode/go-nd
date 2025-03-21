@@ -404,7 +404,7 @@ func (client *Client) checkAndFillTokenTimeout() {
 		log.Printf("[ERROR] Get API Config: %v", err)
 		return
 	}
-	/* Reposne Format
+	/* Response Format
 			{
 			"config": {
 				"idle_session_timeout_sec": 3600,
