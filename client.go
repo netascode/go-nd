@@ -55,7 +55,9 @@ type Client struct {
 	BackoffDelayFactor float64
 	// Authentication mutex
 	AuthenticationMutex *sync.Mutex
+	// Authentication timestamp
 	AuthTimeStamp       time.Time
+	// Authentication token timeout
 	AuthTokenTimeout    time.Duration
 }
 
@@ -95,14 +97,12 @@ func NewClient(url, basePath, usr, pwd, domain string, insecure bool, mods ...fu
 		AuthTokenTimeout:    2 * time.Minute,
 	}
 
+	client.checkAndFillTokenTimeout()
+
 	for _, mod := range mods {
 		mod(&client)
 	}
-	if client.checkAndFillTokenTimeout() {
-		log.Printf("[INFO] Token timeout set to %v", client.AuthTokenTimeout)
-	} else {
-		log.Printf("[ERROR] Token timeout could not be read, using default - %v", client.AuthTokenTimeout)
-	}
+
 	return client, nil
 }
 
@@ -155,13 +155,12 @@ func (client Client) NewReq(method, uri string, body io.Reader, mods ...func(*Re
 	return req
 }
 
-// Do makes a request.
+// Do makes a request and returns the GJSON result.
 // Requests for Do are built ouside of the client, e.g.
 //
 //	req := client.NewReq("GET", "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/control/fabrics", nil)
 //	res, _ := client.Do(req)
 func (client *Client) Do(req Req) (Res, error) {
-
 	var res Res
 	defer log.Printf("[DEBUG] Exit from Do method")
 	bodyBytes, err := client.doReq(req)
@@ -180,6 +179,7 @@ func (client *Client) Do(req Req) (Res, error) {
 	return res, nil
 }
 
+// DoRaw makes a request and returns the raw response (bytes).
 func (client *Client) DoRaw(req Req) ([]byte, error) {
 	defer log.Printf("[DEBUG] Exit from DoRaw method")
 	bodyBytes, err := client.doReq(req)
@@ -271,8 +271,9 @@ func (client *Client) Get(path string, mods ...func(*Req)) (Res, error) {
 	return client.Do(req)
 }
 
+// GetRawJson makes a GET request and returns the raw response (bytes).
+// Results will be the raw data structure as returned by Nexus Dashboard
 func (client *Client) GetRawJson(path string, mods ...func(*Req)) ([]byte, error) {
-	log.Printf("[DEBUG] Starting get request %v", path)
 	req := client.NewReq("GET", client.BasePath+path, nil, mods...)
 	err := client.Authenticate()
 	if err != nil {
@@ -324,7 +325,7 @@ func (client *Client) Login() error {
 	log.Printf("[TRACE] Client Login: starting http request")
 	httpRes, err := client.HttpClient.Do(req.HttpReq)
 	if err != nil {
-		log.Printf("[ERROR] Client Login:HTTP request failed - %v", err)
+		log.Printf("[ERROR] Client Login: HTTP request failed - %v", err)
 		return err
 	}
 	defer httpRes.Body.Close()
@@ -390,18 +391,18 @@ func (client *Client) Backoff(attempts int) bool {
 	return true
 }
 
-func (client *Client) checkAndFillTokenTimeout() bool {
+func (client *Client) checkAndFillTokenTimeout() {
 
 	req := client.NewReq("GET", "/api/config/dn/apigwcfg/default", nil, NoLogPayload)
 	err := client.Authenticate()
 	if err != nil {
 		log.Printf("[ERROR] Get API Config: Authentication failed - %v", err)
-		return false
+		return
 	}
 	result, err := client.Do(req)
 	if err != nil {
 		log.Printf("[ERROR] Get API Config: %v", err)
-		return false
+		return
 	}
 	/* Reposne Format
 			{
@@ -415,8 +416,9 @@ func (client *Client) checkAndFillTokenTimeout() bool {
 	tokenTimeout := result.Get("config.jwt_session_timeout_sec").Int()
 	if tokenTimeout > 0 {
 		client.AuthTokenTimeout = (time.Duration(tokenTimeout/2) * time.Second)
-		return true
+		log.Printf("[INFO] Token timeout set to %v", client.AuthTokenTimeout)
+		return
 	}
+	client.AuthTokenTimeout = 2 * time.Minute
 	log.Printf("[ERROR] Token timeout could not be read %v, using default value", result)
-	return false
 }
