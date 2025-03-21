@@ -181,3 +181,36 @@ func TestClientPut(t *testing.T) {
 	_, err = client.Put("/url", "{}")
 	assert.Error(t, err)
 }
+
+// TestClientGetRawJson tests the Client::GetRawJson method.
+func TestClientGetRawJson(t *testing.T) {
+	defer gock.Off()
+	client := authenticatedTestClient()
+	var err error
+
+	// Success
+	gock.New(testURL).Get("/url").Reply(200)
+	_, err = client.GetRawJson("/url")
+	assert.NoError(t, err)
+
+	// HTTP error
+	gock.New(testURL).Get("/url").ReplyError(errors.New("fail"))
+	_, err = client.GetRawJson("/url")
+	assert.Error(t, err)
+
+	// Invalid HTTP status code
+	gock.New(testURL).Get("/url").Reply(405)
+	_, err = client.GetRawJson("/url")
+	assert.Error(t, err)
+
+	// Error decoding response body
+	gock.New(testURL).
+		Get("/url").
+		Reply(200).
+		Map(func(res *http.Response) *http.Response {
+			res.Body = io.NopCloser(ErrReader{})
+			return res
+		})
+	_, err = client.GetRawJson("/url")
+	assert.Error(t, err)
+}
