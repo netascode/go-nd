@@ -56,9 +56,9 @@ type Client struct {
 	// Authentication mutex
 	AuthenticationMutex *sync.Mutex
 	// Authentication timestamp
-	AuthTimeStamp       time.Time
+	AuthTimeStamp time.Time
 	// Authentication token timeout
-	AuthTokenTimeout    time.Duration
+	AuthTokenTimeout time.Duration
 }
 
 // NewClient creates a new Nexus Dashboard HTTP client.
@@ -94,10 +94,8 @@ func NewClient(url, basePath, usr, pwd, domain string, insecure bool, mods ...fu
 		BackoffMaxDelay:     DefaultBackoffMaxDelay,
 		BackoffDelayFactor:  DefaultBackoffDelayFactor,
 		AuthenticationMutex: &sync.Mutex{},
-		AuthTokenTimeout:    2 * time.Minute,
+		AuthTokenTimeout:    0,
 	}
-
-	client.checkAndFillTokenTimeout()
 
 	for _, mod := range mods {
 		mod(&client)
@@ -346,6 +344,32 @@ func (client *Client) Login() error {
 	return nil
 }
 
+func (client *Client) checkAndFillTokenTimeout() {
+	req := client.NewReq("GET", "/api/config/dn/apigwcfg/default", nil, NoLogPayload)
+	result, err := client.Do(req)
+	if err != nil {
+		log.Printf("[ERROR] Get API Config: %v", err)
+		return
+	}
+	/* Response Format
+			{
+			"config": {
+				"idle_session_timeout_sec": 3600,
+				"jwt_session_timeout_sec": 1200,
+				"log_level": "info"
+			},
+	    }
+	*/
+	tokenTimeout := result.Get("config.jwt_session_timeout_sec").Int()
+	if tokenTimeout > 0 {
+		client.AuthTokenTimeout = (time.Duration(tokenTimeout/2) * time.Second)
+		log.Printf("[INFO] Token timeout set to %v", client.AuthTokenTimeout)
+		return
+	}
+	client.AuthTokenTimeout = 2 * time.Minute
+	log.Printf("[ERROR] Token timeout could not be read %v, using default value", result)
+}
+
 // Login if no token available or token timeout has reached
 func (client *Client) Authenticate() error {
 	var err error
@@ -361,6 +385,7 @@ func (client *Client) Authenticate() error {
 	}
 	if loginNeeded {
 		err = client.Login()
+		client.checkAndFillTokenTimeout()
 	}
 	log.Printf("[TRACE] Authentication complete")
 	client.AuthenticationMutex.Unlock()
@@ -389,36 +414,4 @@ func (client *Client) Backoff(attempts int) bool {
 	time.Sleep(backoffDuration)
 	log.Printf("[DEBUG] Exit from backoff method with return value true")
 	return true
-}
-
-func (client *Client) checkAndFillTokenTimeout() {
-
-	req := client.NewReq("GET", "/api/config/dn/apigwcfg/default", nil, NoLogPayload)
-	err := client.Authenticate()
-	if err != nil {
-		log.Printf("[ERROR] Get API Config: Authentication failed - %v", err)
-		return
-	}
-	result, err := client.Do(req)
-	if err != nil {
-		log.Printf("[ERROR] Get API Config: %v", err)
-		return
-	}
-	/* Response Format
-			{
-			"config": {
-				"idle_session_timeout_sec": 3600,
-				"jwt_session_timeout_sec": 1200,
-				"log_level": "info"
-			},
-	    }
-	*/
-	tokenTimeout := result.Get("config.jwt_session_timeout_sec").Int()
-	if tokenTimeout > 0 {
-		client.AuthTokenTimeout = (time.Duration(tokenTimeout/2) * time.Second)
-		log.Printf("[INFO] Token timeout set to %v", client.AuthTokenTimeout)
-		return
-	}
-	client.AuthTokenTimeout = 2 * time.Minute
-	log.Printf("[ERROR] Token timeout could not be read %v, using default value", result)
 }

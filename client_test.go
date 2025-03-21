@@ -24,6 +24,8 @@ func testClient() Client {
 func authenticatedTestClient() Client {
 	client := testClient()
 	client.Token = "ABC"
+	client.AuthTimeStamp = time.Now()
+	client.AuthTokenTimeout = 2 * time.Minute
 	return client
 }
 
