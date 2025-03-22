@@ -1,3 +1,8 @@
+## 0.1.2 (unreleased)
+
+- Handle token timeouts
+- Add `GetRawJson()` function returning the raw response (bytes)
+
 ## 0.1.1
 
 - Do not retry after receiving 500 HTTP response
