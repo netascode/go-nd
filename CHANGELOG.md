@@ -1,4 +1,4 @@
-## 0.1.2 (unreleased)
+## 0.1.2
 
 - Handle token timeouts
 - Add `GetRawJson()` function returning the raw response (bytes)
