@@ -162,14 +162,16 @@ func (client *Client) Do(req Req) (Res, error) {
 	var res Res
 	defer log.Printf("[DEBUG] Exit from Do method")
 	bodyBytes, err := client.doReq(req)
+	// Look for response message in case of error also
+	if len(bodyBytes) > 0 {
+		if !json.Valid(bodyBytes) {
+			res = Res(gjson.Parse(`{"response": "` + string(bodyBytes) + `"}`))
+		} else {
+			res = Res(gjson.ParseBytes(bodyBytes))
+		}
+	}
 	if err != nil {
 		return res, err
-	}
-
-	if !json.Valid(bodyBytes) {
-		res = Res(gjson.Parse(`{"response": "` + string(bodyBytes) + `"}`))
-	} else {
-		res = Res(gjson.ParseBytes(bodyBytes))
 	}
 	if req.LogPayload {
 		log.Printf("[DEBUG] HTTP Response: %s", res)
