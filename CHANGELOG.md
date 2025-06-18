@@ -1,3 +1,7 @@
+## 0.1.3 (unreleased)
+
+- Also return response message in error cases
+
 ## 0.1.2
 
 - Handle token timeouts
