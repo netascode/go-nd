@@ -1,3 +1,8 @@
+## Unreleased
+
+- Refresh auth token when retrying
+- Extended TCP timeout to handle long http timeouts
+
 ## 0.1.3
 
 - Also return response message in error cases

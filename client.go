@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
@@ -66,8 +67,14 @@ type Client struct {
 //
 //	client, _ := NewClient("https://10.1.1.1", "/appcenter/cisco/ndfc/api/v1", "user", "password", "", true, RequestTimeout(120))
 func NewClient(url, basePath, usr, pwd, domain string, insecure bool, mods ...func(*Client)) (Client, error) {
+	// Configure TCP dial timeout (default 120 seconds to avoid OS 2-minute timeout)
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
+		DialContext: (&net.Dialer{
+			Timeout:   120 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout: 30 * time.Second,
 	}
 
 	cookieJar, _ := cookiejar.New(nil)
@@ -108,6 +115,16 @@ func NewClient(url, basePath, usr, pwd, domain string, insecure bool, mods ...fu
 func RequestTimeout(x time.Duration) func(*Client) {
 	return func(client *Client) {
 		client.HttpClient.Timeout = x * time.Second
+		// Update TCP dial timeout if total timeout is >= 2 minutes
+		// to avoid OS-level TCP timeout interfering with longer request timeouts
+		if x >= 120 {
+			if transport, ok := client.HttpClient.Transport.(*http.Transport); ok {
+				transport.DialContext = (&net.Dialer{
+					Timeout:   x * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext
+			}
+		}
 	}
 }
 
@@ -193,8 +210,6 @@ func (client *Client) DoRaw(req Req) ([]byte, error) {
 }
 
 func (client *Client) doReq(req Req) ([]byte, error) {
-	// add token
-	req.HttpReq.Header.Add("Authorization", "Bearer "+client.Token)
 	// retain the request body across multiple attempts
 	var body []byte
 	if req.HttpReq.Body != nil {
@@ -203,6 +218,8 @@ func (client *Client) doReq(req Req) ([]byte, error) {
 	var bodyBytes []byte
 	defer log.Printf("[DEBUG] Exit from doReq method")
 	for attempts := 0; ; attempts++ {
+		// Set Authorization header inside loop to pick up refreshed tokens after re-authentication
+		req.HttpReq.Header.Set("Authorization", "Bearer "+client.Token)
 		req.HttpReq.Body = io.NopCloser(bytes.NewBuffer(body))
 		if req.LogPayload {
 			log.Printf("[DEBUG] HTTP Request: %s, |%s|, |%s|", req.HttpReq.Method, req.HttpReq.URL, req.HttpReq.Body)
