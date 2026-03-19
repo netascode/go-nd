@@ -1,4 +1,4 @@
-## Unreleased
+## 0.1.4
 
 - Refresh auth token when retrying
 - Extended TCP timeout to handle long http timeouts
