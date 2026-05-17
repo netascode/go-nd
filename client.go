@@ -42,6 +42,14 @@ type Client struct {
 	Usr string
 	// Pwd is the Nexus Dashboard password.
 	Pwd string
+	// ApiKey is the Nexus Dashboard user API key (alternative to password-based auth).
+	// When set, requests use X-Nd-Username and X-Nd-Apikey headers instead of JWT Bearer tokens.
+	ApiKey string
+	// authBasePath is the auto-detected URL prefix for authentication endpoints (login, logout, refresh).
+	// Set automatically on first login by trying /api/v1/infra (4.2.1+) first, then falling back to "".
+	authBasePath string
+	// authDetected indicates whether the auth endpoint has been discovered.
+	authDetected bool
 	// Domain is the Nexus Dashboard domain.
 	Domain string
 	// Insecure determines if insecure https connections are allowed.
@@ -156,6 +164,15 @@ func BackoffDelayFactor(x float64) func(*Client) {
 	}
 }
 
+// UserApiKey sets API key authentication.
+// When set, the client uses X-Nd-Username and X-Nd-Apikey in the header
+// instead of JWT Bearer token authentication. No login or refresh is needed.
+func UserApiKey(x string) func(*Client) {
+	return func(client *Client) {
+		client.ApiKey = x
+	}
+}
+
 // NewReq creates a new Req request for this client.
 func (client Client) NewReq(method, uri string, body io.Reader, mods ...func(*Req)) Req {
 	httpReq, _ := http.NewRequest(method, client.Url+uri, body)
@@ -218,8 +235,14 @@ func (client *Client) doReq(req Req) ([]byte, error) {
 	var bodyBytes []byte
 	defer log.Printf("[DEBUG] Exit from doReq method")
 	for attempts := 0; ; attempts++ {
-		// Set Authorization header inside loop to pick up refreshed tokens after re-authentication
-		req.HttpReq.Header.Set("Authorization", "Bearer "+client.Token)
+		// Set auth headers inside loop to pick up refreshed tokens after re-authentication
+		if client.ApiKey != "" {
+			req.HttpReq.Header.Set("X-Nd-Username", client.Usr)
+			req.HttpReq.Header.Set("X-Nd-Apikey", client.ApiKey)
+			req.HttpReq.Header.Del("Authorization")
+		} else {
+			req.HttpReq.Header.Set("Authorization", "Bearer "+client.Token)
+		}
 		req.HttpReq.Body = io.NopCloser(bytes.NewBuffer(body))
 		if req.LogPayload {
 			log.Printf("[DEBUG] HTTP Request: %s, |%s|, |%s|", req.HttpReq.Method, req.HttpReq.URL, req.HttpReq.Body)
@@ -261,6 +284,11 @@ func (client *Client) doReq(req Req) ([]byte, error) {
 				continue
 			} else if httpRes.StatusCode == 401 && strings.Contains(string(bodyBytes), "token has expired") {
 				log.Printf("[ERROR] HTTP Request failed: StatusCode %v, Retries: %v", httpRes.StatusCode, attempts)
+				if client.ApiKey != "" {
+					// API key auth does not support re-authentication
+					log.Printf("[ERROR] API key authentication failed (401)")
+					return bodyBytes, fmt.Errorf("HTTP Request failed: StatusCode %v", httpRes.StatusCode)
+				}
 				client.Token = ""
 				err := client.Authenticate()
 				if err != nil {
@@ -332,14 +360,47 @@ func (client *Client) Put(path, data string, mods ...func(*Req)) (Res, error) {
 	return client.Do(req)
 }
 
-// Login authenticates to the Nexus Dashboard instance.
+// Login handles authentication to Nexus Dashboard.
+// On the first call, Login auto-detects the correct endpoint by trying
+// /api/v1/infra/login (4.2.1+) first. If that returns a non-200 status,
+// it falls back to /login (pre-4.2.1). The discovered path is cached for
+// subsequent calls.
 func (client *Client) Login() error {
 	body := ""
 	body, _ = sjson.Set(body, "userName", client.Usr)
 	body, _ = sjson.Set(body, "userPasswd", client.Pwd)
 	body, _ = sjson.Set(body, "domain", client.Domain)
-	req := client.NewReq("POST", "/login", strings.NewReader(body), NoLogPayload)
-	log.Printf("[TRACE] Client Login: starting http request")
+
+	if client.authDetected {
+		// Path already discovered — use it directly
+		return client.doLogin(client.authBasePath+"/login", body)
+	}
+
+	// Auto-detect: try 4.2.1+ endpoint first
+	log.Printf("[DEBUG] Auto-detecting auth endpoint...")
+	err := client.doLogin("/api/v1/infra/login", body)
+	if err == nil {
+		client.authBasePath = "/api/v1/infra"
+		client.authDetected = true
+		log.Printf("[DEBUG] Auto-detected auth endpoint: /api/v1/infra")
+		return nil
+	}
+
+	// Fall back to legacy endpoint
+	log.Printf("[DEBUG] New auth endpoint not available, falling back to /login")
+	err = client.doLogin("/login", body)
+	if err == nil {
+		client.authBasePath = ""
+		client.authDetected = true
+		log.Printf("[DEBUG] Auto-detected auth endpoint: /login (legacy)")
+	}
+	return err
+}
+
+// doLogin performs the actual login HTTP request to the given path.
+func (client *Client) doLogin(path, body string) error {
+	req := client.NewReq("POST", path, strings.NewReader(body), NoLogPayload)
+	log.Printf("[TRACE] Client Login: starting http request to %s", path)
 	httpRes, err := client.HttpClient.Do(req.HttpReq)
 	if err != nil {
 		log.Printf("[ERROR] Client Login: HTTP request failed - %v", err)
@@ -347,19 +408,85 @@ func (client *Client) Login() error {
 	}
 	defer httpRes.Body.Close()
 	if httpRes.StatusCode != 200 {
-		log.Printf("[ERROR] Authentication failed: StatusCode %v", httpRes.StatusCode)
+		log.Printf("[ERROR] Authentication failed at %s: StatusCode %v", path, httpRes.StatusCode)
 		return fmt.Errorf("Authentication failed")
 	}
 	bodyBytes, _ := io.ReadAll(httpRes.Body)
 	res := Res(gjson.ParseBytes(bodyBytes))
-	token := res.Get("token").String()
+	token := res.Get("jwttoken").String()
+	if token == "" {
+		token = res.Get("token").String()
+	}
 	if token == "" {
 		log.Printf("[ERROR] Token retrieval failed: no token in payload")
 		return fmt.Errorf("Authentication failed")
 	}
 	client.Token = token
 	client.AuthTimeStamp = time.Now()
-	log.Printf("[DEBUG] Authentication successful")
+	log.Printf("[DEBUG] Authentication successful via %s", path)
+	return nil
+}
+
+// Refresh attempts to refresh the current JWT token using the 4.2.1+ /refresh endpoint.
+// Returns an error if the endpoint is not available (pre-4.2.1) or the refresh fails.
+func (client *Client) Refresh() error {
+	body := ""
+	body, _ = sjson.Set(body, "jwttoken", client.Token)
+	req := client.NewReq("POST", client.authBasePath+"/refresh", strings.NewReader(body), NoLogPayload)
+	log.Printf("[TRACE] Client Refresh: starting http request")
+	httpRes, err := client.HttpClient.Do(req.HttpReq)
+	if err != nil {
+		log.Printf("[ERROR] Client Refresh: HTTP request failed - %v", err)
+		return err
+	}
+	defer httpRes.Body.Close()
+	if httpRes.StatusCode != 200 {
+		log.Printf("[DEBUG] Token refresh failed: StatusCode %v (endpoint may not be available)", httpRes.StatusCode)
+		return fmt.Errorf("Token refresh failed: StatusCode %v", httpRes.StatusCode)
+	}
+	bodyBytes, _ := io.ReadAll(httpRes.Body)
+	res := Res(gjson.ParseBytes(bodyBytes))
+	token := res.Get("jwttoken").String()
+	if token == "" {
+		token = res.Get("token").String()
+	}
+	if token == "" {
+		log.Printf("[ERROR] Token refresh failed: no token in payload")
+		return fmt.Errorf("Token refresh failed")
+	}
+	client.Token = token
+	client.AuthTimeStamp = time.Now()
+	log.Printf("[DEBUG] Token refresh successful")
+	return nil
+}
+
+// Logout terminates the current session using the 4.2.1+ /logout endpoint.
+// Returns an error if the endpoint is not available (pre-4.2.1) or the logout fails.
+// This is a no-op when using API key authentication.
+func (client *Client) Logout() error {
+	if client.ApiKey != "" {
+		log.Printf("[DEBUG] Logout skipped: using API key authentication")
+		return nil
+	}
+	if client.Token == "" {
+		log.Printf("[DEBUG] Logout skipped: no active token")
+		return nil
+	}
+	req := client.NewReq("POST", client.authBasePath+"/logout", nil, NoLogPayload)
+	req.HttpReq.Header.Set("Authorization", "Bearer "+client.Token)
+	log.Printf("[TRACE] Client Logout: starting http request")
+	httpRes, err := client.HttpClient.Do(req.HttpReq)
+	if err != nil {
+		log.Printf("[ERROR] Client Logout: HTTP request failed - %v", err)
+		return err
+	}
+	defer httpRes.Body.Close()
+	if httpRes.StatusCode != 200 {
+		log.Printf("[DEBUG] Logout failed: StatusCode %v (endpoint may not be available)", httpRes.StatusCode)
+		return fmt.Errorf("Logout failed: StatusCode %v", httpRes.StatusCode)
+	}
+	client.Token = ""
+	log.Printf("[DEBUG] Logout successful")
 	return nil
 }
 
@@ -389,22 +516,37 @@ func (client *Client) checkAndFillTokenTimeout() {
 	log.Printf("[ERROR] Token timeout could not be read %v, using default value", result)
 }
 
-// Login if no token available or token timeout has reached
+// Authenticate ensures the client has a valid authentication state.
+// For API key auth: no-op (API key is sent per-request via headers).
+// For JWT auth: logs in if no token, attempts refresh if token is expiring
+// (falling back to full login if refresh fails or is unavailable on pre-4.2.1).
 func (client *Client) Authenticate() error {
+	// API key auth requires no login/refresh
+	if client.ApiKey != "" {
+		log.Printf("[TRACE] Using API key authentication, skipping login")
+		return nil
+	}
+
 	var err error
 	log.Printf("[TRACE] Attempting authentication...")
 	client.AuthenticationMutex.Lock()
-	loginNeeded := false
 	if client.Token == "" {
 		log.Printf("[DEBUG] No token available, attempting login...")
-		loginNeeded = true
-	} else if time.Since(client.AuthTimeStamp) > client.AuthTokenTimeout {
-		log.Printf("[DEBUG] Token has expired, attempting login...")
-		loginNeeded = true
-	}
-	if loginNeeded {
 		err = client.Login()
-		client.checkAndFillTokenTimeout()
+		if err == nil {
+			client.checkAndFillTokenTimeout()
+		}
+	} else if time.Since(client.AuthTimeStamp) > client.AuthTokenTimeout {
+		log.Printf("[DEBUG] Token approaching expiry, attempting refresh...")
+		err = client.Refresh()
+		if err != nil {
+			// Refresh failed (pre-4.2.1 or other error), fall back to full login
+			log.Printf("[DEBUG] Refresh failed, falling back to login...")
+			err = client.Login()
+			if err == nil {
+				client.checkAndFillTokenTimeout()
+			}
+		}
 	}
 	log.Printf("[TRACE] Authentication complete")
 	client.AuthenticationMutex.Unlock()
