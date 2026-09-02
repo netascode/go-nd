@@ -365,7 +365,17 @@ func (client *Client) Put(path, data string, mods ...func(*Req)) (Res, error) {
 // /api/v1/infra/login (4.2.1+) first. If that returns a non-200 status,
 // it falls back to /login (pre-4.2.1). The discovered path is cached for
 // subsequent calls.
+//
+// Login serializes access via AuthenticationMutex and is safe for
+// concurrent use.
 func (client *Client) Login() error {
+	client.AuthenticationMutex.Lock()
+	defer client.AuthenticationMutex.Unlock()
+	return client.login()
+}
+
+// login performs authentication. Callers must hold AuthenticationMutex.
+func (client *Client) login() error {
 	body := ""
 	body, _ = sjson.Set(body, "userName", client.Usr)
 	body, _ = sjson.Set(body, "userPasswd", client.Pwd)
@@ -429,7 +439,17 @@ func (client *Client) doLogin(path, body string) error {
 
 // Refresh attempts to refresh the current JWT token using the 4.2.1+ /refresh endpoint.
 // Returns an error if the endpoint is not available (pre-4.2.1) or the refresh fails.
+//
+// Refresh serializes access via AuthenticationMutex and is safe for
+// concurrent use.
 func (client *Client) Refresh() error {
+	client.AuthenticationMutex.Lock()
+	defer client.AuthenticationMutex.Unlock()
+	return client.refresh()
+}
+
+// refresh performs the token refresh. Callers must hold AuthenticationMutex.
+func (client *Client) refresh() error {
 	body := ""
 	body, _ = sjson.Set(body, "jwttoken", client.Token)
 	req := client.NewReq("POST", client.authBasePath+"/refresh", strings.NewReader(body), NoLogPayload)
@@ -463,7 +483,17 @@ func (client *Client) Refresh() error {
 // Logout terminates the current session using the 4.2.1+ /logout endpoint.
 // Returns an error if the endpoint is not available (pre-4.2.1) or the logout fails.
 // This is a no-op when using API key authentication.
+//
+// Logout serializes access via AuthenticationMutex and is safe for
+// concurrent use.
 func (client *Client) Logout() error {
+	client.AuthenticationMutex.Lock()
+	defer client.AuthenticationMutex.Unlock()
+	return client.logout()
+}
+
+// logout performs the session termination. Callers must hold AuthenticationMutex.
+func (client *Client) logout() error {
 	if client.ApiKey != "" {
 		log.Printf("[DEBUG] Logout skipped: using API key authentication")
 		return nil
@@ -532,17 +562,17 @@ func (client *Client) Authenticate() error {
 	client.AuthenticationMutex.Lock()
 	if client.Token == "" {
 		log.Printf("[DEBUG] No token available, attempting login...")
-		err = client.Login()
+		err = client.login()
 		if err == nil {
 			client.checkAndFillTokenTimeout()
 		}
 	} else if time.Since(client.AuthTimeStamp) > client.AuthTokenTimeout {
 		log.Printf("[DEBUG] Token approaching expiry, attempting refresh...")
-		err = client.Refresh()
+		err = client.refresh()
 		if err != nil {
 			// Refresh failed (pre-4.2.1 or other error), fall back to full login
 			log.Printf("[DEBUG] Refresh failed, falling back to login...")
-			err = client.Login()
+			err = client.login()
 			if err == nil {
 				client.checkAndFillTokenTimeout()
 			}
