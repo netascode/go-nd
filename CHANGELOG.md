@@ -1,3 +1,7 @@
+## Unreleased
+
+- Add API key authentication and ND 4.2.1+ auth endpoint support
+
 ## 0.1.4
 
 - Refresh auth token when retrying
